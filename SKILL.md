@@ -19,6 +19,7 @@ allowed-tools: Read, Grep, Glob, Edit, Write, Bash, Task, AskUserQuestion
 | `PROTO.md` | 协议工程修改规范、客户端请求限制 | Phase 2 协议设计、Phase 4 实现、**Phase 7 沉淀** |
 | `TEST.md` | 测试类型、测试规范、验证清单、压测机器人、容灾测试 | Phase 4 实现后测试、Phase 6 审查、上线前压测、**Phase 7 沉淀** |
 | `REVIEW.md` | 代码审查规范、检查清单、容量限制、序列化检查 | Phase 6 产出审查、上线前检查、**Phase 7 沉淀** |
+| `NPC.md` | NPC 系统架构、AI 决策、DB 存取流程、测试要点 | NPC 功能开发、Phase 4 实现、**Phase 7 沉淀** |
 
 ---
 
