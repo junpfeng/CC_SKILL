@@ -12,6 +12,8 @@
 | 压测机器人（Section 9-11） | 上线前压测 |
 | 容灾测试（Section 10） | 上线前容灾验证 |
 | 自动化脚本（Section 12） | 完整测试流程 |
+| 玩家登录场景数据验证（Section 14） | 新/老玩家数据一致性验证 |
+| 物理系统测试（Section 15） | 物理引擎功能验证 |
 
 ### 相关文档
 
@@ -465,6 +467,9 @@ start_delay = 50          # 启动间隔（毫秒）
 | `login_logout_stress` | `login_logout_stress.json` | 登录登出压力测试 |
 | `match_disconnect_stress` | `match_disconnect_stress.json` | 匹配中断线压力测试 |
 | `disaster_recovery_stress` | `disaster_recovery_stress.json` | 容灾综合测试 |
+| `new_player_scene_test` | `new_player_scene_test.json` | 新玩家全场景登录测试 |
+| `old_player_data_verify` | `old_player_data_verify.json` | 老玩家数据一致性验证 |
+| `physics_stress` | `physics_stress.json` | 物理系统压力测试 |
 
 ### 9.6 自定义测试计划
 
@@ -971,9 +976,491 @@ servers/**/internal/**/*_test.go
 
 ---
 
-## 14. 并行测试执行
+## 14. 玩家登录场景数据验证测试
 
-### 14.1 并行性分析
+验证新玩家和老玩家登录各场景后数据是否正确。
+
+### 14.1 测试场景类型
+
+根据 `SceneTypeEnumProto` 定义，游戏支持以下场景类型：
+
+| 场景类型 | 枚举值 | 说明 | 测试优先级 |
+|----------|--------|------|------------|
+| City | 1 | 大世界/主场景 | 高 |
+| Town | 7 | 小镇（玩家私人） | 高 |
+| Sakura | 8 | 樱花校园 | 高 |
+| Dungeon | 2 | 副本 | 中 |
+| Match | 6 | 匹配场景 | 中 |
+| Possession | 3 | 资产（家园等） | 中 |
+| Test | 0 | 测试场景 | 低 |
+
+### 14.2 玩家核心数据验证项
+
+登录后需要验证的关键数据（来自 `UserRes` 和 `DBSaveRoleInfo`）：
+
+| 数据类别 | 验证字段 | 验证内容 |
+|----------|----------|----------|
+| **基础信息** | `RoleId`, `AccountId` | ID 正确且匹配 |
+| | `RoleName` | 名称不为空，长度合规 |
+| | `Gender`, `Title` | 数值在有效范围内 |
+| | `CreateStamp` | 时间戳合理 |
+| **成长数据** | `RoleLevel`, `RoleExp` | 等级经验非负，等级<=上限 |
+| | `GrowthAttributeList` | 属性列表完整 |
+| **资产数据** | `RoleWallet` | 金币/钻石数量非负 |
+| | `RoleBackpack` | 背包物品数据完整 |
+| | `ClothingBackpack` | 服装数据完整 |
+| | `HouseList`, `VehicleList` | 房屋车辆列表可空但不为nil |
+| **形象数据** | `PartList`, `AvatarList` | 形象部件完整 |
+| | `SakuraPartList` | 樱花形象列表（可空） |
+| **小镇数据** | `TownInventoryComp` | 小镇库存数据 |
+| | `TownPlayerStatus` | 小镇玩家状态 |
+| **樱花数据** | `SakuraWorkshopCompInfo` | 樱花工坊数据 |
+| **特殊玩法** | `Achievement` | 成就数据 |
+| | `WelcomeDungeonInfo` | 新手副本信息 |
+
+### 14.3 新玩家 vs 老玩家差异
+
+| 验证项 | 新玩家预期 | 老玩家预期 |
+|--------|------------|------------|
+| `RoleLevel` | 1 | >= 1 |
+| `RoleExp` | 0 或初始值 | 根据等级累积 |
+| `RoleWallet` | 初始金额（配置） | >= 0 |
+| `Achievement` | 无或初始成就 | 有进度 |
+| `TownInventoryComp` | 空或初始 | 有存货 |
+| `HouseList` | 空或初始房屋 | 可能有多个 |
+| `LastOnlineTime` | 0 或首次登录时间 | 历史登录时间 |
+| `LastOfflineTime` | 0 | 上次离线时间 |
+
+### 14.4 测试动作
+
+**已实现动作**（可直接使用）：
+
+| 动作类型 | 说明 | 参数 |
+|----------|------|------|
+| `verify_data_action` | 验证角色基础数据 | 无 |
+| `enter_town_action` | 进入小镇场景 | `teleport_id`(可选) |
+| `enter_sakura_action` | 进入樱花校园 | 无 |
+| `enter_city_action` | 进入大世界 | `teleport_id`(可选) |
+| `exit_scene_action` | 退出当前场景 | 无 |
+| `random_move_action` | 随机移动 | `duration_ms` |
+| `logout_action` | 登出 | 无 |
+| `relogin_action` | 重新登录 | 无 |
+| `gm_action` | 执行GM命令 | `gm_text` |
+| `wait_action` | 等待指定时间 | `duration_ms` |
+
+**待实现动作**（需要扩展 action.go）：
+
+| 动作类型 | 说明 | 参数 |
+|----------|------|------|
+| `verify_player_data_action` | 验证玩家详细数据 | `check_items`: 验证项列表 |
+| `verify_scene_data_action` | 验证场景相关数据 | `scene_type`: 场景类型 |
+| `compare_before_after_action` | 对比操作前后数据 | `snapshot_key`: 快照键名 |
+
+### 14.5 测试计划示例
+
+**新玩家全场景登录测试** (`new_player_scene_test.json`)：
+
+```json
+{
+    "name": "new_player_scene_test",
+    "description": "新玩家登录各场景数据验证。依次进入小镇、樱花校园、大世界，每个场景停留后验证数据",
+    "actions": [
+        {"action_type": "verify_data_action", "params": {}},
+        {"action_type": "enter_town_action", "params": {}},
+        {"action_type": "wait_action", "params": {"duration_ms": 5000}},
+        {"action_type": "random_move_action", "params": {"duration_ms": 3000}},
+        {"action_type": "verify_data_action", "params": {}},
+        {"action_type": "enter_sakura_action", "params": {}},
+        {"action_type": "wait_action", "params": {"duration_ms": 5000}},
+        {"action_type": "random_move_action", "params": {"duration_ms": 3000}},
+        {"action_type": "verify_data_action", "params": {}},
+        {"action_type": "exit_scene_action", "params": {}},
+        {"action_type": "wait_action", "params": {"duration_ms": 3000}},
+        {"action_type": "enter_city_action", "params": {"teleport_id": 0}},
+        {"action_type": "wait_action", "params": {"duration_ms": 5000}},
+        {"action_type": "random_move_action", "params": {"duration_ms": 3000}},
+        {"action_type": "verify_data_action", "params": {}},
+        {"action_type": "exit_scene_action", "params": {}},
+        {"action_type": "wait_action", "params": {"duration_ms": 2000}}
+    ],
+    "loop_count": 1
+}
+```
+
+**老玩家数据一致性测试** (`old_player_data_verify.json`)：
+
+```json
+{
+    "name": "old_player_data_verify",
+    "description": "老玩家数据一致性验证。登录 -> 进入小镇 -> 执行GM加钱 -> 登出 -> 重登 -> 验证数据",
+    "actions": [
+        {"action_type": "verify_data_action", "params": {}},
+        {"action_type": "enter_town_action", "params": {}},
+        {"action_type": "wait_action", "params": {"duration_ms": 3000}},
+        {"action_type": "gm_action", "params": {"gm_text": "/ke* gm add_money 1 1000"}},
+        {"action_type": "wait_action", "params": {"duration_ms": 2000}},
+        {"action_type": "random_move_action", "params": {"duration_ms": 5000}},
+        {"action_type": "verify_data_action", "params": {}},
+        {"action_type": "logout_action", "params": {}},
+        {"action_type": "wait_action", "params": {"duration_ms": 3000}},
+        {"action_type": "relogin_action", "params": {}},
+        {"action_type": "wait_action", "params": {"duration_ms": 3000}},
+        {"action_type": "verify_data_action", "params": {}},
+        {"action_type": "enter_town_action", "params": {}},
+        {"action_type": "wait_action", "params": {"duration_ms": 3000}},
+        {"action_type": "verify_data_action", "params": {}}
+    ],
+    "loop_count": 10
+}
+```
+
+### 14.6 验证检查清单
+
+**新玩家登录验证**：
+- [ ] 基础信息（ID、名称、性别）正确初始化
+- [ ] 等级和经验为初始值
+- [ ] 钱包金额为配置的初始值
+- [ ] 背包为空或只有初始物品
+- [ ] 形象数据完整
+- [ ] 进入小镇数据正确
+- [ ] 进入樱花校园数据正确
+- [ ] 进入副本数据正确
+
+**老玩家登录验证**：
+- [ ] 基础信息与数据库一致
+- [ ] 等级经验与存档一致
+- [ ] 钱包金额与存档一致
+- [ ] 背包物品完整无丢失
+- [ ] 成就进度正确恢复
+- [ ] 小镇数据正确恢复
+- [ ] 重登后数据无变化
+
+**场景切换数据验证**：
+- [ ] 切换场景后角色位置正确
+- [ ] 切换场景后背包数据不变
+- [ ] 切换场景后钱包数据不变
+- [ ] 切换场景后状态正确更新
+
+### 14.7 相关代码位置
+
+| 功能 | 代码位置 |
+|------|----------|
+| 场景类型定义 | `common/proto/base_pb.go:81-90` |
+| 玩家状态结构 | `orm/mongo/player_state.go` |
+| 完整角色数据 | `common/proto/db_pb.go:10055-10079` |
+| 登录返回数据 | `common/proto/logic_pb.go:7191-7201` |
+| 玩家进入场景 | `servers/scene_server/internal/net_func/player/enter.go` |
+| 数据持久化 | `servers/db_server/internal/data/row_mgr.go` |
+
+---
+
+## 15. 物理系统测试
+
+验证游戏物理系统的正确性，包括 PhysX 物理引擎和体素物理系统。
+
+### 15.1 物理系统架构
+
+项目包含两套物理系统：
+
+| 系统 | 目录 | 用途 |
+|------|------|------|
+| **PhysX 物理引擎** | `pkg/physics/`, `common/physics/` | 角色控制、刚体模拟、触发器 |
+| **体素物理系统** | `common/voxel/physics/` | 建筑/地形碰撞、体素射线检测 |
+
+### 15.2 PhysX 物理功能
+
+#### 核心类型
+
+| 类型 | 说明 |
+|------|------|
+| `SourcePhysx` | 物理场景容器 |
+| `Vec3f` | 三维浮点向量 |
+| `Actor` | 普通刚体（球体、立方体、胶囊体） |
+| `Trigger` | 触发器（进入/离开事件） |
+| `CharacterController` | 角色控制器 |
+| `RaycastResult` | 射线检测结果 |
+
+#### 测试功能点
+
+| 功能模块 | 测试内容 |
+|----------|----------|
+| **场景管理** | 场景创建/销毁、模拟步进 |
+| **刚体创建** | 球体/立方体/胶囊体创建和销毁 |
+| **角色控制** | 创建、移动、获取位置、销毁 |
+| **触发器** | 创建、回调设置、进入/离开事件 |
+| **射线检测** | Raycast 命中检测、距离计算 |
+| **调试工具** | PVD 连接（可选） |
+
+### 15.3 体素物理功能
+
+#### 核心类型
+
+| 类型 | 说明 |
+|------|------|
+| `Ray` | 射线（整数坐标，单位：厘米） |
+| `RaycastHit` | 射线命中结果 |
+| `CollisionInfo` | 碰撞信息 |
+
+#### 测试功能点
+
+| 功能模块 | 测试内容 |
+|----------|----------|
+| **碰撞检测** | 点与体素碰撞、AABB 碰撞 |
+| **碰撞解决** | 推出体素、穿透深度计算 |
+| **射线检测** | DDA 算法射线检测、多体素穿透 |
+| **精度验证** | 整数运算精度、距离计算 |
+
+### 15.4 单元测试用例
+
+#### PhysX 物理测试
+
+```go
+// 文件: common/physics/physx_test.go
+
+func TestPhysXScene(t *testing.T) {
+    tests := []struct {
+        name string
+        test func(t *testing.T)
+    }{
+        {"CreateAndDestroyScene", testCreateDestroyScene},
+        {"SimulationStep", testSimulationStep},
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, tt.test)
+    }
+}
+
+func TestCharacterController(t *testing.T) {
+    tests := []struct {
+        name string
+        test func(t *testing.T)
+    }{
+        {"CreateController", testCreateController},
+        {"MoveController", testMoveController},
+        {"GetPosition", testGetPosition},
+        {"DestroyController", testDestroyController},
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, tt.test)
+    }
+}
+
+func TestTrigger(t *testing.T) {
+    tests := []struct {
+        name string
+        test func(t *testing.T)
+    }{
+        {"CreateTrigger", testCreateTrigger},
+        {"TriggerEnterCallback", testTriggerEnter},
+        {"TriggerExitCallback", testTriggerExit},
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, tt.test)
+    }
+}
+
+func TestRaycast(t *testing.T) {
+    tests := []struct {
+        name     string
+        origin   Vec3f
+        dir      Vec3f
+        maxDist  float32
+        expected bool // 是否命中
+    }{
+        {"HitGround", Vec3f{0, 10, 0}, Vec3f{0, -1, 0}, 100, true},
+        {"MissEmpty", Vec3f{0, 10, 0}, Vec3f{0, 1, 0}, 100, false},
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            result := scene.Raycast(tt.origin, tt.dir, tt.maxDist)
+            if result.Hit != tt.expected {
+                t.Errorf("Raycast hit=%v, want %v", result.Hit, tt.expected)
+            }
+        })
+    }
+}
+```
+
+#### 体素物理测试
+
+```go
+// 文件: common/voxel/physics/collision_test.go
+
+func TestVoxelCollision(t *testing.T) {
+    tests := []struct {
+        name     string
+        point    common.Vec3I
+        expected bool
+    }{
+        {"InsideSolid", common.Vec3I{100, 100, 100}, true},
+        {"InsideEmpty", common.Vec3I{0, 1000, 0}, false},
+        {"AtBoundary", common.Vec3I{0, 0, 0}, true},
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            info := CheckCollision(world, tt.point)
+            if info.Collided != tt.expected {
+                t.Errorf("Collision=%v, want %v", info.Collided, tt.expected)
+            }
+        })
+    }
+}
+
+func TestVoxelRaycast(t *testing.T) {
+    tests := []struct {
+        name        string
+        ray         Ray
+        expectHit   bool
+        expectDist  int32 // 厘米
+    }{
+        {
+            "DownwardRay",
+            Ray{Origin: common.Vec3I{0, 10000, 0}, Direction: common.Vec3I{0, -1, 0}, MaxDistance: 20000},
+            true,
+            10000,
+        },
+        {
+            "HorizontalMiss",
+            Ray{Origin: common.Vec3I{0, 50000, 0}, Direction: common.Vec3I{1, 0, 0}, MaxDistance: 10000},
+            false,
+            0,
+        },
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            hit := Raycast(world, tt.ray)
+            if hit.Hit != tt.expectHit {
+                t.Errorf("Hit=%v, want %v", hit.Hit, tt.expectHit)
+            }
+            if hit.Hit && hit.Distance != tt.expectDist {
+                t.Errorf("Distance=%d, want %d", hit.Distance, tt.expectDist)
+            }
+        })
+    }
+}
+
+func TestCollisionResolution(t *testing.T) {
+    tests := []struct {
+        name        string
+        point       common.Vec3I
+        expectPush  bool
+    }{
+        {"PushOutOfSolid", common.Vec3I{50, 50, 50}, true},
+        {"NoNeedPush", common.Vec3I{0, 1000, 0}, false},
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            resolved := ResolveCollision(world, tt.point)
+            pushed := resolved != tt.point
+            if pushed != tt.expectPush {
+                t.Errorf("Pushed=%v, want %v", pushed, tt.expectPush)
+            }
+        })
+    }
+}
+```
+
+### 15.5 集成测试场景
+
+| 测试场景 | 验证内容 |
+|----------|----------|
+| **角色移动碰撞** | 角色控制器移动时正确触发碰撞 |
+| **触发器区域** | 进入/离开触发区域事件正确触发 |
+| **射线拾取** | 点击地面/物体射线检测正确 |
+| **角色站立** | 角色站在地面上不穿透 |
+| **斜坡行走** | 角色在斜坡上正常移动 |
+| **跳跃落地** | 跳跃后正确落地，不穿透地面 |
+
+### 15.6 压测动作
+
+**已实现动作**（通过移动间接测试物理系统）：
+
+| 动作类型 | 说明 | 参数 |
+|----------|------|------|
+| `random_move_action` | 随机移动（触发物理碰撞） | `duration_ms` |
+| `enter_town_action` | 进入小镇（加载物理场景） | `teleport_id`(可选) |
+| `enter_sakura_action` | 进入樱花校园 | 无 |
+| `enter_city_action` | 进入大世界 | `teleport_id`(可选) |
+
+**待实现动作**（需要扩展 action.go）：
+
+| 动作类型 | 说明 | 参数 |
+|----------|------|------|
+| `physics_move_stress_action` | 物理移动压测 | `duration_ms`, `move_speed` |
+| `trigger_stress_action` | 触发器压测 | `trigger_count`, `enter_exit_cycles` |
+| `raycast_stress_action` | 射线检测压测 | `ray_count`, `max_distance` |
+
+### 15.7 物理测试计划示例
+
+**物理系统压测** (`physics_stress.json`)：
+
+```json
+{
+    "name": "physics_stress",
+    "description": "物理系统压力测试。在各场景中持续移动，触发物理碰撞检测",
+    "actions": [
+        {"action_type": "enter_town_action", "params": {}},
+        {"action_type": "wait_action", "params": {"duration_ms": 3000}},
+        {"action_type": "random_move_action", "params": {"duration_ms": 30000}},
+        {"action_type": "verify_data_action", "params": {}},
+        {"action_type": "enter_sakura_action", "params": {}},
+        {"action_type": "wait_action", "params": {"duration_ms": 3000}},
+        {"action_type": "random_move_action", "params": {"duration_ms": 30000}},
+        {"action_type": "verify_data_action", "params": {}},
+        {"action_type": "exit_scene_action", "params": {}},
+        {"action_type": "wait_action", "params": {"duration_ms": 2000}},
+        {"action_type": "enter_city_action", "params": {"teleport_id": 0}},
+        {"action_type": "wait_action", "params": {"duration_ms": 3000}},
+        {"action_type": "random_move_action", "params": {"duration_ms": 30000}},
+        {"action_type": "verify_data_action", "params": {}},
+        {"action_type": "exit_scene_action", "params": {}},
+        {"action_type": "wait_action", "params": {"duration_ms": 2000}}
+    ],
+    "loop_count": 10
+}
+```
+
+### 15.8 验证检查清单
+
+**PhysX 物理验证**：
+- [ ] 场景创建销毁无内存泄漏
+- [ ] 刚体创建销毁正确
+- [ ] 角色控制器移动正确
+- [ ] 触发器回调正确触发
+- [ ] 射线检测结果正确
+- [ ] 多线程访问安全
+
+**体素物理验证**：
+- [ ] 碰撞检测准确
+- [ ] 碰撞解决推出方向正确
+- [ ] 射线检测 DDA 算法正确
+- [ ] 整数运算无溢出
+- [ ] 距离计算精度正确
+- [ ] 分级体素结构正确遍历
+
+**集成验证**：
+- [ ] 角色不穿透地面
+- [ ] 角色不穿透墙壁
+- [ ] 跳跃落地物理正确
+- [ ] 触发器事件与逻辑同步
+- [ ] 大量物理对象不卡顿
+
+### 15.9 相关代码位置
+
+| 功能 | 代码位置 |
+|------|----------|
+| PhysX 封装 | `common/physics/physx.go` |
+| PhysX 类型定义 | `pkg/physics/type.go` |
+| 体素碰撞检测 | `common/voxel/physics/collision.go` |
+| 体素射线检测 | `common/voxel/physics/raycast.go` |
+| 物理工具函数 | `common/voxel/physics/utils.go` |
+| 场景物理管理 | `servers/scene_server/internal/ecs/system/physics/` |
+
+---
+
+## 16. 并行测试执行
+
+### 16.1 并行性分析
 
 运行测试前，先分析测试文件的独立性：
 
@@ -984,7 +1471,7 @@ servers/**/internal/**/*_test.go
 | 共享可写状态 | **不可以** | 需串行或隔离 |
 | 有依赖顺序 | **不可以** | 需按顺序执行 |
 
-### 14.2 使用 subagent 并行测试
+### 16.2 使用 subagent 并行测试
 
 当测试文件互相独立时，使用多个 subagent 并行执行：
 
@@ -1009,7 +1496,7 @@ servers/**/internal/**/*_test.go
 - 充分利用多核 CPU
 - 失败定位更精确
 
-### 14.3 go test 内置并行
+### 16.3 go test 内置并行
 
 Go 测试框架本身支持并行：
 
@@ -1024,7 +1511,7 @@ func TestXxx(t *testing.T) {
 }
 ```
 
-### 14.4 测试执行最佳实践
+### 16.4 测试执行最佳实践
 
 1. **优先使用 subagent 并行**：独立测试文件用不同 subagent 执行
 2. **分组执行**：相关测试分组，组内串行，组间并行
